@@ -56,8 +56,8 @@ def lib():
         _lib.simdjson_arrow_read_ndjson.restype = ctypes.c_int
         _lib.simdjson_arrow_read_ndjson.argtypes = [
             ctypes.c_char_p, ctypes.c_size_t, ctypes.c_size_t, ctypes.POINTER(ArrowSchema),
-            ctypes.c_size_t, ctypes.c_int, ctypes.c_int, ctypes.POINTER(ArrowArrayStream),
-            ctypes.c_char_p, ctypes.c_size_t]
+            ctypes.c_size_t, ctypes.c_int, ctypes.c_int, ctypes.c_size_t,
+            ctypes.POINTER(ArrowArrayStream), ctypes.c_char_p, ctypes.c_size_t]
     return _lib
 
 
@@ -65,18 +65,23 @@ class ReadError(Exception):
     pass
 
 
-def ours(data, schema, block_size=0, error_on_unknown_fields=False, validate_skipped=True):
-    c_schema = ArrowSchema()
-    schema._export_to_c(ctypes.addressof(c_schema))
+def ours(data, schema=None, block_size=0, error_on_unknown_fields=False, validate_skipped=True,
+         threads=1):
+    """Reads data with simdjson_arrow, inferring the schema if it is None."""
+    c_schema = None
+    if schema is not None:
+        c_schema = ArrowSchema()
+        schema._export_to_c(ctypes.addressof(c_schema))
     stream = ArrowArrayStream()
     error = ctypes.create_string_buffer(1024)
     try:
         rc = lib().simdjson_arrow_read_ndjson(
-            data, len(data), len(data), ctypes.byref(c_schema), block_size,
-            int(error_on_unknown_fields), int(validate_skipped), ctypes.byref(stream), error,
-            len(error))
+            data, len(data), len(data), ctypes.byref(c_schema) if c_schema else None, block_size,
+            int(error_on_unknown_fields), int(validate_skipped), threads, ctypes.byref(stream),
+            error, len(error))
     finally:
-        c_schema.release(ctypes.byref(c_schema))
+        if c_schema is not None:
+            c_schema.release(ctypes.byref(c_schema))
     if rc != 0:
         raise ReadError(error.value.decode())
     reader = pa.RecordBatchReader._import_from_c(ctypes.addressof(stream))

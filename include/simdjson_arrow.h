@@ -115,8 +115,12 @@ status export_schema(const field& schema, ArrowSchema* out);
 
 struct ndjson_options {
   // We start a new record batch once a batch holds this many bytes of JSON.
-  // No record may be larger than block_size.
   size_t block_size{1 << 20};
+  // With more than one thread, each thread reads blocks of about block_size
+  // bytes, cut at line ends: a record must then fit on one line (as in Arrow's
+  // JSON reader, by default). If reading in parallel fails, we read again in
+  // one thread (for the same error message, or to read records spanning lines).
+  size_t threads{1};
   // A key absent from the schema is an error (otherwise it is skipped).
   bool error_on_unknown_fields{false};
   // Check that skipped values are valid JSON. Otherwise only their structure
@@ -132,6 +136,25 @@ struct ndjson_options {
 status read_ndjson(const field& schema, simdjson::padded_string_view json,
                    std::vector<ArrowArray>* batches, const ndjson_options& options = {});
 
+// Reads newline-delimited JSON into record batches, inferring the schema
+// (written in *schema). As with Arrow's JSON reader: null is of type null,
+// true and false are boolean, integers that fit in 64 bits are int64, other
+// numbers are float64, strings are utf8, objects are structs and arrays are
+// lists; a field of nulls takes the type of its other values, int64 becomes
+// float64 next to other numbers, and the fields of objects are united (in the
+// order in which they first appear). Other mixes of types are an error.
+status read_ndjson(simdjson::padded_string_view json, field* schema,
+                   std::vector<ArrowArray>* batches, const ndjson_options& options = {});
+
+// The same, for an input json[0, length) without padding. We read it in place
+// in blocks cut at line ends (even with one thread), and copy only the blocks
+// near the end; if that fails (say, a record spans lines), we copy the input
+// and read it again in one thread.
+status read_ndjson(const field& schema, const char* json, size_t length,
+                   std::vector<ArrowArray>* batches, const ndjson_options& options = {});
+status read_ndjson(const char* json, size_t length, field* schema,
+                   std::vector<ArrowArray>* batches, const ndjson_options& options = {});
+
 // Makes an ArrowArrayStream out of a schema and record batches, which the
 // stream takes over.
 void make_stream(const field& schema, std::vector<ArrowArray>&& batches, ArrowArrayStream* out);
@@ -139,21 +162,38 @@ void make_stream(const field& schema, std::vector<ArrowArray>&& batches, ArrowAr
 struct ndjson_write_options {
   // A null field is written as "key":null (otherwise the key is omitted).
   bool write_nulls{true};
+  // With more than one thread, threads write ranges of rows.
+  size_t threads{1};
 };
 
 // Writes record batches as newline-delimited JSON (one object per row, one row
 // per line) into a buffer that grows. Floating-point numbers get the shortest
 // representation that gives them back; NaN and infinities, which JSON lacks,
 // are written as null.
+// Where an ndjson_writer puts its output, instead of a buffer from malloc:
+// say, in a buffer of a language binding, to hand it over without a copy.
+struct ndjson_allocator {
+  // Returns a buffer of at least size bytes that begins with the used first
+  // bytes of p (p is null at first), or null if it cannot.
+  char* (*reallocate)(void* context, char* p, size_t used, size_t size);
+  // Frees p (a buffer from reallocate that release did not give up).
+  void (*deallocate)(void* context, char* p);
+  void* context;
+};
+
 class ndjson_writer {
  public:
   explicit ndjson_writer(const ndjson_write_options& options = {});
+  // With the allocator, release gives up a buffer from allocator.reallocate.
+  ndjson_writer(const ndjson_write_options& options, const ndjson_allocator& allocator);
   ~ndjson_writer();
   ndjson_writer(const ndjson_writer&) = delete;
   ndjson_writer& operator=(const ndjson_writer&) = delete;
   // Writes the rows of a record batch (a struct array), which is not
   // released. On error, nothing is written.
   status write(const ArrowSchema* schema, const ArrowArray* batch);
+  // Writes the rows of n record batches with the same schema.
+  status write(const ArrowSchema* schema, const ArrowArray* const* batches, size_t n);
   // Writes all the batches of the stream, which is released.
   status write(ArrowArrayStream* stream);
   // The JSON written so far.
@@ -184,13 +224,14 @@ status write_ndjson(ArrowArrayStream* stream, std::string* out,
 extern "C" {
 // C entry point (for bindings): reads the newline-delimited JSON in
 // data[0, length) into out. When capacity >= length + SIMDJSON_PADDING, the
-// input is read in place, otherwise it is copied. The schema is not released.
-// Returns 0 on success; otherwise writes a message in error[0, error_capacity)
-// and returns a non-zero value.
+// input is read in place, otherwise it is copied. With a null schema, we infer
+// it; the schema is not released. Zero for block_size or threads means the
+// default. Returns 0 on success; otherwise writes a message in
+// error[0, error_capacity) and returns a non-zero value.
 int simdjson_arrow_read_ndjson(const char* data, size_t length, size_t capacity,
                                const struct ArrowSchema* schema, size_t block_size,
                                int error_on_unknown_fields, int validate_skipped,
-                               struct ArrowArrayStream* out, char* error,
+                               size_t threads, struct ArrowArrayStream* out, char* error,
                                size_t error_capacity);
 
 // C entry point (for bindings): writes the stream (which is released) as
@@ -198,8 +239,9 @@ int simdjson_arrow_read_ndjson(const char* data, size_t length, size_t capacity,
 // *out_length bytes (plus a terminating zero), to free with
 // simdjson_arrow_free. Otherwise writes a message in error[0, error_capacity)
 // and returns a non-zero value.
-int simdjson_arrow_write_ndjson(struct ArrowArrayStream* stream, int write_nulls, char** out,
-                                size_t* out_length, char* error, size_t error_capacity);
+int simdjson_arrow_write_ndjson(struct ArrowArrayStream* stream, int write_nulls,
+                                size_t threads, char** out, size_t* out_length, char* error,
+                                size_t error_capacity);
 void simdjson_arrow_free(void* p);
 }
 

@@ -2,6 +2,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -251,8 +252,130 @@ static void test_write() {
   exported.release(&exported);
 }
 
+// An allocator that counts its buffers.
+struct counting_allocator {
+  int live = 0;
+  static char* reallocate(void* context, char* p, size_t, size_t size) {
+    if (p == nullptr) static_cast<counting_allocator*>(context)->live++;
+    return static_cast<char*>(std::realloc(p, size));
+  }
+  static void deallocate(void* context, char* p) {
+    static_cast<counting_allocator*>(context)->live--;
+    std::free(p);
+  }
+};
+
+static void test_write_allocator() {
+  field schema = make_schema({make_field("i", type::int64), make_field("s", type::utf8)});
+  std::string json;
+  for (int i = 0; i < 100000; i++) json += "{\"i\":" + std::to_string(i) + ",\"s\":\"x\"}\n";
+  ArrowSchema exported;
+  CHECK(export_schema(schema, &exported).ok());
+  for (size_t threads : {1, 4}) {
+    auto batches = read(schema, json);
+    counting_allocator counter;
+    ndjson_allocator allocator{counting_allocator::reallocate, counting_allocator::deallocate,
+                               &counter};
+    ndjson_write_options options;
+    options.threads = threads;
+    {
+      ndjson_writer writer(options, allocator);
+      for (ArrowArray& b : batches) CHECK(writer.write(&exported, &b).ok());
+      CHECK(counter.live == 1);
+      size_t size;
+      char* p = writer.release(&size);
+      CHECK(std::string_view(p, size) == json && p[size] == '\0');
+      allocator.deallocate(&counter, p);
+      CHECK(writer.write(&exported, &batches[0]).ok());  // a new buffer, freed by the writer
+      CHECK(counter.live == 1);
+    }
+    CHECK(counter.live == 0);
+    release(batches);
+  }
+  exported.release(&exported);
+}
+
+// Infers the schema with several threads, and checks that we get the same
+// JSON back as with one thread.
+static void test_infer_threads() {
+  std::string json;
+  for (int i = 0; i < 20000; i++) {
+    json += "{\"i\":" + std::to_string(i);
+    if (i % 3 == 0) json += ",\"d\":" + std::to_string(i) + (i % 2 ? ".5" : "");
+    if (i % 5 == 0) json += ",\"o\":{\"s\":\"x" + std::to_string(i) + "\",\"l\":[null," + std::to_string(i) + "]}";
+    if (i > 15000) json += ",\"late\":true";
+    json += "}\n";
+  }
+  simdjson::padded_string padded(json);
+  std::string reference;
+  field reference_schema;
+  for (size_t threads : {1, 2, 7, 32}) {
+    ndjson_options options;
+    options.block_size = 4096;
+    options.threads = threads;
+    field schema;
+    std::vector<ArrowArray> batches;
+    status s = read_ndjson(padded, &schema, &batches, options);
+    CHECK(s.ok());
+    CHECK(schema.children.size() == 4);
+    CHECK(schema.children[1].type == type::float64);
+    CHECK(schema.children[2].children[1].children[0].type == type::int64);
+    ArrowSchema exported;
+    CHECK(export_schema(schema, &exported).ok());
+    ndjson_write_options write_options;
+    write_options.threads = threads;
+    ndjson_writer writer(write_options);
+    std::vector<const ArrowArray*> pointers;
+    for (ArrowArray& b : batches) pointers.push_back(&b);
+    CHECK(writer.write(&exported, pointers.data(), pointers.size()).ok());
+    exported.release(&exported);
+    release(batches);
+    if (threads == 1) {
+      reference = std::string(writer.view());
+    } else {
+      CHECK(writer.view() == reference);
+    }
+  }
+  CHECK(reference.find("{\"i\":3,\"d\":3.5,\"o\":null,\"late\":null}") != std::string::npos);
+}
+
+// Without padding, we must not read past the end of the input (AddressSanitizer
+// checks it: the input is allocated to its exact size).
+static void test_unpadded() {
+  std::string json;
+  for (int i = 0; i < 3000; i++) json += "{\"a\":" + std::to_string(i) + ",\"s\":\"x\"}\n";
+  json += "{\"a\":3000,\"s\":\"last line without a line end, ending with a number:\",\"n\":12345";
+  json += "}";
+  const std::string bad = json + "\n{\"a\":tru}";
+  const std::string spanning = "{\"a\":\n1}\n{\"a\":\n2}";
+  for (size_t threads : {1, 4}) {
+    for (size_t block : {100, 4096, 1 << 20}) {
+      ndjson_options options;
+      options.threads = threads;
+      options.block_size = block;
+      const std::string* inputs[] = {&json, &bad, &spanning};
+      for (const std::string* input : inputs) {
+        std::unique_ptr<char[]> exact(new char[input->size()]);
+        std::memcpy(exact.get(), input->data(), input->size());
+        field schema;
+        std::vector<ArrowArray> batches;
+        status s = read_ndjson(exact.get(), input->size(), &schema, &batches, options);
+        CHECK(s.ok() == (input != &bad));
+        int64_t rows = 0;
+        for (ArrowArray& b : batches) rows += b.length;
+        CHECK(rows == (input == &json ? 3001 : input == &spanning ? 2 : 0));
+        if (input == &bad) CHECK(contains(s.message, "row 3001"));
+        release(batches);
+      }
+    }
+  }
+}
+
 int main() {
+  test_unpadded();
+  test_infer_threads();
   test_write();
+  test_write_allocator();
   test_scalars();
   test_nested();
   test_keys();

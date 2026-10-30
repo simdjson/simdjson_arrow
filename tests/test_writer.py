@@ -15,13 +15,14 @@ class WriteError(Exception):
     pass
 
 
-def write(table, write_nulls=True):
+def write(table, write_nulls=True, threads=1):
     """Writes a table (or a RecordBatchReader) with simdjson_arrow."""
     library = lib()
     library.simdjson_arrow_write_ndjson.restype = ctypes.c_int
     library.simdjson_arrow_write_ndjson.argtypes = [
-        ctypes.POINTER(ArrowArrayStream), ctypes.c_int, ctypes.POINTER(ctypes.c_void_p),
-        ctypes.POINTER(ctypes.c_size_t), ctypes.c_char_p, ctypes.c_size_t]
+        ctypes.POINTER(ArrowArrayStream), ctypes.c_int, ctypes.c_size_t,
+        ctypes.POINTER(ctypes.c_void_p), ctypes.POINTER(ctypes.c_size_t), ctypes.c_char_p,
+        ctypes.c_size_t]
     library.simdjson_arrow_free.argtypes = [ctypes.c_void_p]
     reader = table if isinstance(table, pa.RecordBatchReader) else pa.RecordBatchReader.from_batches(
         table.schema, table.to_batches())
@@ -30,7 +31,7 @@ def write(table, write_nulls=True):
     out = ctypes.c_void_p()
     length = ctypes.c_size_t()
     error = ctypes.create_string_buffer(1024)
-    if library.simdjson_arrow_write_ndjson(ctypes.byref(stream), int(write_nulls),
+    if library.simdjson_arrow_write_ndjson(ctypes.byref(stream), int(write_nulls), threads,
                                            ctypes.byref(out), ctypes.byref(length), error,
                                            len(error)) != 0:
         raise WriteError(error.value.decode())
@@ -236,3 +237,21 @@ def test_round_trip():
 def test_unsupported(column):
     with pytest.raises(WriteError, match="not supported|unsupported"):
         write(pa.table({"c": column}))
+
+
+@pytest.mark.parametrize("threads", [2, 3, 8, 32])
+def test_threads(threads):
+    rng = random.Random(threads)
+    n = 150000  # several ranges of rows in one batch
+    table = pa.table({
+        "i": pa.array([rng.randint(-10**9, 10**9) for _ in range(n)], pa.int64()),
+        "d": pa.array([rng.choice([None, rng.random()]) for _ in range(n)], pa.float64()),
+        "s": pa.array([rng.choice([None, "a\"b", "é" * rng.randint(0, 5)]) for _ in range(n)]),
+    })
+    expected = write(table)
+    assert write(table, threads=threads) == expected
+    many = pa.Table.from_batches(table.to_batches(max_chunksize=777))  # many small batches
+    assert write(many, threads=threads) == expected
+    assert write(table.slice(12345, 54321), threads=threads) == write(table.slice(12345, 54321))
+    empty = pa.table({"i": pa.array([], pa.int64())})
+    assert write(empty, threads=threads) == b""

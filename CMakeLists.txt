@@ -10,6 +10,9 @@ endif()
 
 option(SIMDJSON_ARROW_TESTS "Build the tests" ON)
 option(SIMDJSON_ARROW_BENCHMARKS "Build the benchmarks" ON)
+# Arrow C++'s own JSON reader, for comparison: needs Arrow C++ (with ARROW_JSON),
+# found by find_package (set CMAKE_PREFIX_PATH to its installation).
+option(SIMDJSON_ARROW_BENCHMARK_ARROW_CPP "Build the Arrow C++ benchmark" OFF)
 
 include(FetchContent)
 FetchContent_Declare(simdjson
@@ -18,10 +21,8 @@ FetchContent_Declare(simdjson
 set(SIMDJSON_DEVELOPER_MODE OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(simdjson)
 
-# zmij (third_party/zmij) writes floating-point numbers. We compile it as C++14:
-# some compilers reject its constant tables in C++17 mode.
+# zmij (third_party/zmij) writes floating-point numbers.
 add_library(zmij OBJECT third_party/zmij/zmij.cc)
-set_target_properties(zmij PROPERTIES CXX_STANDARD 14)
 
 set(SIMDJSON_ARROW_SOURCES src/simdjson_arrow.cpp src/ndjson_writer.cpp $<TARGET_OBJECTS:zmij>)
 
@@ -46,4 +47,11 @@ if(SIMDJSON_ARROW_BENCHMARKS)
   target_link_libraries(bench_ndjson PRIVATE simdjson_arrow)
   add_executable(bench_write benchmarks/bench_write.cpp)
   target_link_libraries(bench_write PRIVATE simdjson_arrow)
+endif()
+
+if(SIMDJSON_ARROW_BENCHMARK_ARROW_CPP)
+  find_package(Arrow REQUIRED)
+  add_executable(bench_arrow_cpp benchmarks/bench_arrow_cpp.cpp)
+  set_target_properties(bench_arrow_cpp PROPERTIES CXX_STANDARD 20)
+  target_link_libraries(bench_arrow_cpp PRIVATE Arrow::arrow_shared)
 endif()

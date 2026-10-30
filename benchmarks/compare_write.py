@@ -1,14 +1,17 @@
-"""Writes Arrow tables as newline-delimited JSON, on one thread, with
+"""Writes Arrow tables as newline-delimited JSON, with THREADS threads (default 1), with
 simdjson_arrow (through its C API), polars.DataFrame.write_ndjson, orjson (on
 the rows of Table.to_pylist) and DuckDB (COPY ... TO a file, on tmpfs if
 TMPDIR points to one). Reports the best of several runs in GB/s of JSON.
 
-    POLARS_MAX_THREADS=1 python benchmarks/compare_write.py flat.ndjson:flat gharchive.ndjson:gh
+    THREADS=1 python benchmarks/compare_write.py flat.ndjson:flat gharchive.ndjson:gh
 """
 import os
 import sys
 import tempfile
 import time
+
+THREADS = int(os.environ.get("THREADS", "1"))
+os.environ["POLARS_MAX_THREADS"] = str(THREADS)  # before polars is imported
 
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "tests"))
 
@@ -28,11 +31,11 @@ def best(fn):
     return t
 
 
-print("file,writer,bytes,seconds,GBps")
+print("file,writer,threads,bytes,seconds,GBps")
 for arg in sys.argv[1:]:
     path, name = arg.rsplit(":", 1)
     table = ours(open(path, "rb").read(), SCHEMAS[name])
-    writers = {"simdjson_arrow": lambda: write(table)}
+    writers = {"simdjson_arrow": lambda: write(table, threads=THREADS)}
     try:
         import polars as pl
         frame = pl.from_arrow(table)
@@ -48,7 +51,7 @@ for arg in sys.argv[1:]:
     try:
         import duckdb
         connection = duckdb.connect()
-        connection.execute("SET threads = 1")
+        connection.execute(f"SET threads = {THREADS}")
         connection.register("t", table)
         target = os.path.join(tempfile.gettempdir(), "simdjson_arrow_bench.json")
 
@@ -62,4 +65,5 @@ for arg in sys.argv[1:]:
         result = fn()
         size = result if isinstance(result, int) else len(result)
         t = best(fn)
-        print(f"{os.path.basename(path)},{writer},{size},{t:.4f},{size / t / 1e9:.3f}", flush=True)
+        print(f"{os.path.basename(path)},{writer},{THREADS},{size},{t:.4f},{size / t / 1e9:.3f}",
+              flush=True)

@@ -1,0 +1,80 @@
+# Writes the library as one header and one source file (tools/amalgamate.py),
+# tests them with simdjson's single files on Linux, macOS and Windows, and, for
+# a tag v*, attaches them to the GitHub release (with singleheader.zip, which
+# holds both, as simdjson does).
+name: single files and release
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  SIMDJSON_VERSION: v5.0.7
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # git describe gives the version in the banner
+      - name: Write the single files
+        run: python3 tools/amalgamate.py singleheader
+      - name: Get simdjson's single files
+        shell: bash
+        run: |
+          for f in simdjson.h simdjson.cpp; do
+            curl -sSfL -o singleheader/$f \
+              https://raw.githubusercontent.com/simdjson/simdjson/$SIMDJSON_VERSION/singleheader/$f
+          done
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+      - name: Build and run the tests (GCC or clang)
+        if: runner.os != 'Windows'
+        working-directory: singleheader
+        run: |
+          c++ -std=c++17 -O2 -Wall -I. ../tests/basic_tests.cpp simdjson_arrow.cpp simdjson.cpp -o basic_tests
+          ./basic_tests
+      - name: Build and run the tests (MSVC)
+        if: runner.os == 'Windows'
+        working-directory: singleheader
+        shell: cmd
+        run: |
+          cl /nologo /std:c++17 /O2 /EHsc /I. ..\tests\basic_tests.cpp simdjson_arrow.cpp simdjson.cpp /Fe:basic_tests.exe
+          basic_tests.exe
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Linux'
+        with:
+          name: singleheader
+          path: |
+            singleheader/simdjson_arrow.h
+            singleheader/simdjson_arrow.cpp
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: singleheader
+          path: singleheader
+      - name: Attach the files to the release
+        working-directory: singleheader
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          zip -j singleheader.zip simdjson_arrow.h simdjson_arrow.cpp
+          gh release view "$TAG" > /dev/null 2>&1 || gh release create "$TAG" --title "$TAG" --generate-notes
+          gh release upload "$TAG" simdjson_arrow.h simdjson_arrow.cpp singleheader.zip --clobber
