@@ -1,0 +1,239 @@
+// Tests without dependencies: we read the exported Arrow buffers directly.
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <string>
+#include <vector>
+
+#include "simdjson_arrow.h"
+
+using namespace simdjson_arrow;
+
+static int failures = 0;
+
+#define CHECK(cond)                                                     \
+  do {                                                                  \
+    if (!(cond)) {                                                      \
+      std::printf("%s:%d: CHECK failed: %s\n", __FILE__, __LINE__, #cond); \
+      failures++;                                                       \
+    }                                                                   \
+  } while (0)
+
+// Reads json, which must succeed, into batches.
+static std::vector<ArrowArray> read(const field& schema, const std::string& json,
+                                    ndjson_options options = {}) {
+  simdjson::padded_string padded(json);
+  std::vector<ArrowArray> batches;
+  status s = read_ndjson(schema, padded, &batches, options);
+  if (!s.ok()) {
+    std::printf("unexpected error: %s\n", s.message.c_str());
+    failures++;
+  }
+  return batches;
+}
+
+// Reads json, which must fail, and returns the error message.
+static std::string read_error(const field& schema, const std::string& json,
+                              ndjson_options options = {}) {
+  simdjson::padded_string padded(json);
+  std::vector<ArrowArray> batches;
+  status s = read_ndjson(schema, padded, &batches, options);
+  CHECK(!s.ok());
+  CHECK(batches.empty());
+  return s.message;
+}
+
+static void release(std::vector<ArrowArray>& batches) {
+  for (ArrowArray& b : batches) b.release(&b);
+}
+
+static bool is_valid(const ArrowArray* a, int64_t i) {
+  if (a->buffers[0] == nullptr) return true;
+  return (static_cast<const uint8_t*>(a->buffers[0])[i >> 3] >> (i & 7)) & 1;
+}
+
+template <typename T>
+static T value_at(const ArrowArray* a, int64_t i) {
+  return static_cast<const T*>(a->buffers[1])[i];
+}
+
+static std::string string_at(const ArrowArray* a, int64_t i) {
+  const int32_t* offsets = static_cast<const int32_t*>(a->buffers[1]);
+  const char* chars = static_cast<const char*>(a->buffers[2]);
+  return std::string(chars + offsets[i], static_cast<size_t>(offsets[i + 1] - offsets[i]));
+}
+
+static bool contains(const std::string& haystack, const char* needle) {
+  bool found = haystack.find(needle) != std::string::npos;
+  if (!found) std::printf("  message: %s\n", haystack.c_str());
+  return found;
+}
+
+static void test_scalars() {
+  field schema = make_schema({make_field("i", type::int64), make_field("u", type::uint64),
+                              make_field("d", type::float64), make_field("s", type::utf8),
+                              make_field("b", type::boolean), make_field("n", type::null)});
+  auto batches = read(schema,
+                      "{\"i\": -3, \"u\": 18446744073709551615, \"d\": 2.5, \"s\": \"h\\u00e9\", "
+                      "\"b\": true, \"n\": null}\n"
+                      "{\"i\": null, \"d\": 7, \"s\": \"\", \"b\": false}\n"
+                      "{\"b\": null, \"s\": null, \"u\": 1, \"i\": 9223372036854775807}\n");
+  CHECK(batches.size() == 1);
+  const ArrowArray& t = batches[0];
+  CHECK(t.length == 3);
+  CHECK(t.n_children == 6);
+  CHECK(t.null_count == 0);
+  const ArrowArray* i = t.children[0];
+  CHECK(value_at<int64_t>(i, 0) == -3);
+  CHECK(!is_valid(i, 1));
+  CHECK(i->null_count == 1);
+  CHECK(value_at<int64_t>(i, 2) == INT64_MAX);
+  const ArrowArray* u = t.children[1];
+  CHECK(value_at<uint64_t>(u, 0) == UINT64_MAX);
+  CHECK(!is_valid(u, 1));
+  CHECK(value_at<uint64_t>(u, 2) == 1);
+  const ArrowArray* d = t.children[2];
+  CHECK(value_at<double>(d, 0) == 2.5);
+  CHECK(value_at<double>(d, 1) == 7.0);
+  CHECK(!is_valid(d, 2));
+  const ArrowArray* s = t.children[3];
+  CHECK(string_at(s, 0) == "h\xc3\xa9");
+  CHECK(string_at(s, 1).empty() && is_valid(s, 1));
+  CHECK(!is_valid(s, 2));
+  const ArrowArray* b = t.children[4];
+  CHECK(b->buffers[0] == nullptr || (is_valid(b, 0) && is_valid(b, 1)));
+  CHECK((static_cast<const uint8_t*>(b->buffers[1])[0] & 3) == 1);
+  CHECK(!is_valid(b, 2));
+  const ArrowArray* n = t.children[5];
+  CHECK(n->n_buffers == 0 && n->null_count == 3);
+  release(batches);
+}
+
+static void test_nested() {
+  field schema = make_schema(
+      {make_struct("actor", {make_field("id", type::int64), make_field("login", type::utf8)}),
+       make_list("tags", make_field("item", type::utf8)),
+       make_list("matrix", make_list("item", make_field("item", type::int64)))});
+  auto batches = read(schema,
+                      "{\"actor\": {\"login\": \"bob\", \"id\": 7}, \"tags\": [\"a\", \"b\"], "
+                      "\"matrix\": [[1], [], [2, 3]]}\n"
+                      "{\"actor\": null, \"tags\": [], \"other\": {\"x\": [1, {\"y\": 2}]}}\n"
+                      "{\"tags\": [null, \"c\"], \"matrix\": null}\n");
+  CHECK(batches.size() == 1);
+  const ArrowArray& t = batches[0];
+  const ArrowArray* actor = t.children[0];
+  CHECK(actor->length == 3 && actor->null_count == 2);
+  CHECK(value_at<int64_t>(actor->children[0], 0) == 7);
+  CHECK(string_at(actor->children[1], 0) == "bob");
+  CHECK(actor->children[0]->length == 3);
+  const ArrowArray* tags = t.children[1];
+  const int32_t* offsets = static_cast<const int32_t*>(tags->buffers[1]);
+  CHECK(offsets[0] == 0 && offsets[1] == 2 && offsets[2] == 2 && offsets[3] == 4);
+  CHECK(string_at(tags->children[0], 1) == "b");
+  CHECK(!is_valid(tags->children[0], 2));
+  CHECK(string_at(tags->children[0], 3) == "c");
+  const ArrowArray* matrix = t.children[2];
+  CHECK(matrix->null_count == 2);
+  const ArrowArray* rows = matrix->children[0];
+  CHECK(rows->length == 3);
+  CHECK(value_at<int64_t>(rows->children[0], 2) == 3);
+  release(batches);
+}
+
+static void test_keys() {
+  field schema = make_schema({make_field("a", type::int64), make_field("b\"c", type::int64)});
+  // escaped keys, keys out of order, a key with a quote in the schema
+  auto batches = read(schema, "{\"\\u0061\": 1, \"b\\\"c\": 2}\n{\"b\\\"c\": 3, \"a\": 4}\n");
+  CHECK(batches.size() == 1);
+  CHECK(value_at<int64_t>(batches[0].children[0], 0) == 1);
+  CHECK(value_at<int64_t>(batches[0].children[1], 0) == 2);
+  CHECK(value_at<int64_t>(batches[0].children[0], 1) == 4);
+  CHECK(value_at<int64_t>(batches[0].children[1], 1) == 3);
+  release(batches);
+}
+
+static void test_batches() {
+  field schema = make_schema({make_field("a", type::int64)});
+  std::string json;
+  for (int i = 0; i < 1000; i++) json += "{\"a\": " + std::to_string(i) + "}\n";
+  ndjson_options options;
+  options.block_size = 1000;
+  auto batches = read(schema, json, options);
+  CHECK(batches.size() > 5);
+  int64_t total = 0, expected = 0;
+  bool in_order = true;
+  for (ArrowArray& b : batches) {
+    for (int64_t i = 0; i < b.length; i++) {
+      in_order = in_order && value_at<int64_t>(b.children[0], i) == expected++;
+    }
+    total += b.length;
+  }
+  CHECK(total == 1000);
+  CHECK(in_order);
+  release(batches);
+  auto none = read(schema, "  \n\n ");
+  CHECK(none.empty());
+}
+
+static void test_errors() {
+  field schema = make_schema({make_field("i", type::int64), make_field("s", type::utf8),
+                              make_field("x", type::int64, /*nullable=*/false)});
+  CHECK(contains(read_error(schema, "{\"x\": 1}\n{\"x\": 2, \"i\": \"no\"}\n"),
+                 "expected a 64-bit signed integer, found a string (row 1, field /i)"));
+  CHECK(contains(read_error(schema, "{\"x\": 1, \"i\": 1.5}"), "found 1.5"));
+  CHECK(contains(read_error(schema, "{\"x\": 1, \"i\": 99999999999999999999}"),
+                 "found 99999999999999999999"));
+  CHECK(contains(read_error(schema, "{\"x\": 1, \"s\": 5}"), "expected a string, found a number"));
+  CHECK(contains(read_error(schema, "{\"i\": 1}"), "missing non-nullable field"));
+  CHECK(contains(read_error(schema, "{\"x\": null}"), "null in a non-nullable field"));
+  CHECK(contains(read_error(schema, "{\"x\": 1, \"x\": 2}"), "duplicate key"));
+  CHECK(contains(read_error(schema, "[1, 2]"), "a record must be a JSON object"));
+  CHECK(contains(read_error(schema, "{\"x\": 1, \"i\": 01}"), "found 01"));
+  CHECK(contains(read_error(schema, "{\"x\": 1, \"i\": tru}"), "invalid"));
+  CHECK(!read_error(schema, "{\"x\": 1, \"i\": 2").empty());
+  ndjson_options strict;
+  strict.error_on_unknown_fields = true;
+  CHECK(contains(read_error(schema, "{\"x\": 1, \"zz\": 2}", strict), "key absent from the schema"));
+  // skipped values are validated, unless we ask otherwise
+  CHECK(contains(read_error(schema, "{\"x\": 1, \"zz\": [1, tru]}"), "invalid"));
+  CHECK(contains(read_error(schema, "{\"x\": 1, \"zz\": {\"a\": 01}}"), "invalid JSON number"));
+  ndjson_options lax;
+  lax.validate_skipped = false;
+  auto batches = read(schema, "{\"x\": 1, \"zz\": {\"a\": 123456789012345678901234567890}}", lax);
+  release(batches);
+  batches = read(schema, "{\"x\": 1, \"zz\": 123456789012345678901234567890}");
+  release(batches);
+}
+
+static void test_schema_round_trip() {
+  field schema = make_schema(
+      {make_field("i", type::int64, false),
+       make_struct("o", {make_list("l", make_field("item", type::float64))})});
+  ArrowSchema exported;
+  CHECK(export_schema(schema, &exported).ok());
+  CHECK(std::strcmp(exported.format, "+s") == 0);
+  CHECK(std::strcmp(exported.children[0]->format, "l") == 0);
+  CHECK(exported.children[0]->flags == 0);
+  CHECK(std::strcmp(exported.children[1]->children[0]->format, "+l") == 0);
+  field back;
+  CHECK(import_schema(&exported, &back).ok());
+  CHECK(back.children.size() == 2);
+  CHECK(back.children[1].children[0].children[0].type == type::float64);
+  CHECK(!back.children[0].nullable && back.children[1].nullable);
+  exported.release(&exported);
+}
+
+int main() {
+  test_scalars();
+  test_nested();
+  test_keys();
+  test_batches();
+  test_errors();
+  test_schema_round_trip();
+  if (failures != 0) {
+    std::printf("%d failure(s)\n", failures);
+    return EXIT_FAILURE;
+  }
+  std::printf("all tests passed\n");
+  return EXIT_SUCCESS;
+}
