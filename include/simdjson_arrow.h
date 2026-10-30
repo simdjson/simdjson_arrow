@@ -1,4 +1,4 @@
-// simdjson_arrow: newline-delimited JSON to Apache Arrow, with simdjson.
+// simdjson_arrow: newline-delimited JSON to Apache Arrow and back, with simdjson.
 //
 // The results are Arrow C Data Interface structures (ArrowSchema, ArrowArray,
 // ArrowArrayStream): any Arrow implementation (Arrow C++, pyarrow, polars,
@@ -9,7 +9,9 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "simdjson.h"
@@ -134,6 +136,49 @@ status read_ndjson(const field& schema, simdjson::padded_string_view json,
 // stream takes over.
 void make_stream(const field& schema, std::vector<ArrowArray>&& batches, ArrowArrayStream* out);
 
+struct ndjson_write_options {
+  // A null field is written as "key":null (otherwise the key is omitted).
+  bool write_nulls{true};
+};
+
+// Writes record batches as newline-delimited JSON (one object per row, one row
+// per line) into a buffer that grows. Floating-point numbers get the shortest
+// representation that gives them back; NaN and infinities, which JSON lacks,
+// are written as null.
+class ndjson_writer {
+ public:
+  explicit ndjson_writer(const ndjson_write_options& options = {});
+  ~ndjson_writer();
+  ndjson_writer(const ndjson_writer&) = delete;
+  ndjson_writer& operator=(const ndjson_writer&) = delete;
+  // Writes the rows of a record batch (a struct array), which is not
+  // released. On error, nothing is written.
+  status write(const ArrowSchema* schema, const ArrowArray* batch);
+  // Writes all the batches of the stream, which is released.
+  status write(ArrowArrayStream* stream);
+  // The JSON written so far.
+  std::string_view view() const;
+  // Gives up the JSON written so far: a buffer from malloc (to free with
+  // free) of *size bytes, followed by a zero byte. The writer is left empty.
+  char* release(size_t* size);
+
+ private:
+  struct impl;
+  std::unique_ptr<impl> impl_;
+};
+
+// Appends the rows of a record batch (a struct array) to out, as
+// newline-delimited JSON: one object per row, one row per line. Floating-point
+// numbers get the shortest representation that gives them back; NaN and
+// infinities, which JSON lacks, are written as null. The batch is not released.
+status write_ndjson(const ArrowSchema* schema, const ArrowArray* batch, std::string* out,
+                    const ndjson_write_options& options = {});
+
+// Appends all the batches of the stream to out, as newline-delimited JSON.
+// The stream is released.
+status write_ndjson(ArrowArrayStream* stream, std::string* out,
+                    const ndjson_write_options& options = {});
+
 }  // namespace simdjson_arrow
 
 extern "C" {
@@ -147,6 +192,15 @@ int simdjson_arrow_read_ndjson(const char* data, size_t length, size_t capacity,
                                int error_on_unknown_fields, int validate_skipped,
                                struct ArrowArrayStream* out, char* error,
                                size_t error_capacity);
+
+// C entry point (for bindings): writes the stream (which is released) as
+// newline-delimited JSON. On success, returns 0 and sets *out to a buffer of
+// *out_length bytes (plus a terminating zero), to free with
+// simdjson_arrow_free. Otherwise writes a message in error[0, error_capacity)
+// and returns a non-zero value.
+int simdjson_arrow_write_ndjson(struct ArrowArrayStream* stream, int write_nulls, char** out,
+                                size_t* out_length, char* error, size_t error_capacity);
+void simdjson_arrow_free(void* p);
 }
 
 #endif  // SIMDJSON_ARROW_H

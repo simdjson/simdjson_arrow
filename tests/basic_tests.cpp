@@ -223,7 +223,36 @@ static void test_schema_round_trip() {
   exported.release(&exported);
 }
 
+static void test_write() {
+  field schema = make_schema(
+      {make_field("i", type::int64), make_field("d", type::float64), make_field("s", type::utf8),
+       make_struct("o", {make_field("b", type::boolean), make_list("l", make_field("x", type::uint64))})});
+  const std::string json =
+      "{\"i\":-1,\"d\":0.1,\"s\":\"a\\\"\\n\\u0001\",\"o\":{\"b\":true,\"l\":[1,18446744073709551615]}}\n"
+      "{\"i\":null,\"d\":1.0,\"s\":null,\"o\":null}\n"
+      "{\"i\":3,\"d\":null,\"s\":\"\",\"o\":{\"b\":null,\"l\":[]}}\n";
+  ndjson_options options;
+  options.block_size = 64;  // several batches
+  auto batches = read(schema, json, options);
+  CHECK(batches.size() > 1);
+  ArrowSchema exported;
+  CHECK(export_schema(schema, &exported).ok());
+  std::string out;
+  for (ArrowArray& b : batches) CHECK(write_ndjson(&exported, &b, &out).ok());
+  CHECK(out == json);
+  ndjson_write_options no_nulls;
+  no_nulls.write_nulls = false;
+  std::string compact;
+  ArrowArrayStream stream;
+  make_stream(schema, std::move(batches), &stream);
+  CHECK(write_ndjson(&stream, &compact, no_nulls).ok());
+  CHECK(stream.release == nullptr);
+  CHECK(compact.find("\n{\"d\":1.0}\n{\"i\":3,\"s\":\"\",\"o\":{\"l\":[]}}\n") != std::string::npos);
+  exported.release(&exported);
+}
+
 int main() {
+  test_write();
   test_scalars();
   test_nested();
   test_keys();

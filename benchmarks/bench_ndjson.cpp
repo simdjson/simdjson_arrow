@@ -1,14 +1,14 @@
 // Reads a newline-delimited JSON file into Arrow record batches and reports
 // the best throughput over several runs.
 //   bench_ndjson <file.ndjson> <schema: flat | gh> [rounds] [validate: 1 | 0]
-// flat: the records of gendata.py in the blog benchmark (9 columns);
-// gh: six fields of the GH Archive events, the other fields are skipped.
+// The schemas are in schemas.h.
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <string>
 
+#include "schemas.h"
 #include "simdjson_arrow.h"
 
 using namespace simdjson_arrow;
@@ -23,19 +23,7 @@ int main(int argc, char** argv) {
   ndjson_options options;
   options.validate_skipped = argc > 4 ? std::atoi(argv[4]) != 0 : true;
   field schema;
-  if (which == "flat") {
-    schema = make_schema({make_field("id", type::int64), make_field("user", type::int64),
-                          make_field("price", type::float64), make_field("lat", type::float64),
-                          make_field("lon", type::float64), make_field("name", type::utf8),
-                          make_field("tag", type::utf8), make_field("active", type::boolean),
-                          make_field("count", type::int64)});
-  } else if (which == "gh") {
-    schema = make_schema(
-        {make_field("id", type::utf8), make_field("type", type::utf8),
-         make_struct("actor", {make_field("id", type::int64), make_field("login", type::utf8)}),
-         make_struct("repo", {make_field("id", type::int64), make_field("name", type::utf8)}),
-         make_field("public", type::boolean), make_field("created_at", type::utf8)});
-  } else {
+  if (!benchmark_schema(which, &schema)) {
     std::fprintf(stderr, "unknown schema %s\n", which.c_str());
     return EXIT_FAILURE;
   }
