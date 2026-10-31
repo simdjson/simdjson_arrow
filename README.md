@@ -61,7 +61,7 @@ With CMake, the `simdjson_arrow` target brings simdjson with it:
 include(FetchContent)
 FetchContent_Declare(simdjson_arrow
   GIT_REPOSITORY https://github.com/simdjson/simdjson_arrow.git
-  GIT_TAG v0.1.0)
+  GIT_TAG v0.1.1)
 set(SIMDJSON_ARROW_TESTS OFF CACHE BOOL "" FORCE)
 set(SIMDJSON_ARROW_BENCHMARKS OFF CACHE BOOL "" FORCE)
 set(SIMDJSON_ARROW_EXAMPLES OFF CACHE BOOL "" FORCE)

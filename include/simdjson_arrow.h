@@ -173,7 +173,9 @@ struct ndjson_write_options {
 // say, in a buffer of a language binding, to hand it over without a copy.
 struct ndjson_allocator {
   // Returns a buffer of at least size bytes that begins with the used first
-  // bytes of p (p is null at first), or null if it cannot.
+  // bytes of p (p is null at first), or null if it cannot. After a null, p
+  // is the allocator's (to free, or not): the writer forgets it, with what it
+  // held, and the write fails with "out of memory".
   char* (*reallocate)(void* context, char* p, size_t used, size_t size);
   // Frees p (a buffer from reallocate that release did not give up).
   void (*deallocate)(void* context, char* p);

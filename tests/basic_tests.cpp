@@ -345,6 +345,66 @@ static void test_write_out_of_memory() {
   exported.release(&exported);
 }
 
+// An allocator that fails at its call number fail_at, freeing p as it fails
+// (as a Python bytes object does): the writer must forget p, report "out of
+// memory", and stay usable.
+struct failing_allocator {
+  int calls = 0;
+  int fail_at = 0;
+  int live = 0;
+  static char* reallocate(void* context, char* p, size_t, size_t size) {
+    failing_allocator& a = *static_cast<failing_allocator*>(context);
+    if (++a.calls == a.fail_at) {
+      if (p != nullptr) a.live--;
+      std::free(p);
+      return nullptr;
+    }
+    if (p == nullptr) a.live++;
+    return static_cast<char*>(std::realloc(p, size));
+  }
+  static void deallocate(void* context, char* p) {
+    static_cast<failing_allocator*>(context)->live--;
+    std::free(p);
+  }
+};
+
+static void test_write_allocator_failures() {
+  field schema = make_schema({make_field("i", type::int64), make_field("s", type::utf8)});
+  std::string json;
+  for (int i = 0; i < 20000; i++) json += "{\"i\":" + std::to_string(i) + ",\"s\":\"x\"}\n";
+  ArrowSchema exported;
+  CHECK(export_schema(schema, &exported).ok());
+  auto batches = read(schema, json);
+  std::vector<const ArrowArray*> pointers;
+  for (ArrowArray& b : batches) pointers.push_back(&b);
+  for (size_t threads : {1, 4}) {
+    for (int fail_at = 1; fail_at <= 12; fail_at++) {
+      failing_allocator a;
+      a.fail_at = fail_at;
+      ndjson_allocator allocator{failing_allocator::reallocate, failing_allocator::deallocate, &a};
+      ndjson_write_options options;
+      options.threads = threads;
+      {
+        ndjson_writer writer(options, allocator);
+        // Batch by batch (the buffer grows with one thread), then all at once.
+        status s;
+        for (ArrowArray& b : batches) {
+          if (!(s = writer.write(&exported, &b)).ok()) break;
+        }
+        if (s.ok()) s = writer.write(&exported, pointers.data(), pointers.size());
+        CHECK(s.ok() ? writer.view() == json + json
+                     : s.message == "out of memory" && writer.view().empty());
+        a.fail_at = 0;
+        CHECK(writer.write(&exported, pointers.data(), pointers.size()).ok());  // usable again
+        CHECK(writer.view().substr(writer.view().size() - json.size()) == json);
+      }
+      CHECK(a.live == 0);
+    }
+  }
+  release(batches);
+  exported.release(&exported);
+}
+
 // Infers the schema with several threads, and checks that we get the same
 // JSON back as with one thread.
 static void test_infer_threads() {
@@ -424,6 +484,7 @@ static void test_unpadded() {
 int main() {
   test_parallel_for();
   test_write_out_of_memory();
+  test_write_allocator_failures();
   test_unpadded();
   test_infer_threads();
   test_write();
