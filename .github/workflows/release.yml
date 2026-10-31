@@ -42,13 +42,17 @@ jobs:
         run: |
           c++ -std=c++17 -O2 -Wall -I. ../tests/basic_tests.cpp simdjson_arrow.cpp simdjson.cpp -o basic_tests
           ./basic_tests
+          c++ -std=c++17 -O2 -Wall -I. ../examples/example.cpp simdjson_arrow.cpp simdjson.cpp -o example
+          ./example
       - name: Build and run the tests (MSVC)
         if: runner.os == 'Windows'
         working-directory: singleheader
         shell: cmd
         run: |
-          cl /nologo /std:c++17 /O2 /EHsc /I. ..\tests\basic_tests.cpp simdjson_arrow.cpp simdjson.cpp /Fe:basic_tests.exe
-          basic_tests.exe
+          cl /nologo /std:c++17 /O2 /EHsc /I. ..\tests\basic_tests.cpp simdjson_arrow.cpp simdjson.cpp /Fe:basic_tests.exe || exit /b 1
+          basic_tests.exe || exit /b 1
+          cl /nologo /std:c++17 /O2 /EHsc /I. ..\examples\example.cpp simdjson_arrow.cpp simdjson.cpp /Fe:example.exe || exit /b 1
+          example.exe
       - uses: actions/upload-artifact@v4
         if: runner.os == 'Linux'
         with:

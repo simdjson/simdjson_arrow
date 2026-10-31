@@ -1,9 +1,8 @@
 // simdjson_arrow: newline-delimited JSON to Apache Arrow and back, with simdjson.
 //
 // The results are Arrow C Data Interface structures (ArrowSchema, ArrowArray,
-// ArrowArrayStream): any Arrow implementation (Arrow C++, pyarrow, polars,
-// DuckDB, nanoarrow...) can take them without copying. We do not depend on
-// Arrow.
+// ArrowArrayStream): any Arrow implementation (Arrow C++, nanoarrow,
+// DuckDB...) can take them without copying. We do not depend on Arrow.
 #ifndef SIMDJSON_ARROW_H
 #define SIMDJSON_ARROW_H
 

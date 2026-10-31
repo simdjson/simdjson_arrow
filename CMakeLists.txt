@@ -10,9 +10,11 @@ endif()
 
 option(SIMDJSON_ARROW_TESTS "Build the tests" ON)
 option(SIMDJSON_ARROW_BENCHMARKS "Build the benchmarks" ON)
-# Arrow C++'s own JSON reader, for comparison: needs Arrow C++ (with ARROW_JSON),
-# found by find_package (set CMAKE_PREFIX_PATH to its installation).
-option(SIMDJSON_ARROW_BENCHMARK_ARROW_CPP "Build the Arrow C++ benchmark" OFF)
+option(SIMDJSON_ARROW_EXAMPLES "Build the examples" ON)
+# The example with Arrow C++, and the benchmark of Arrow C++'s own JSON reader:
+# they need Arrow C++ (with ARROW_JSON), found by find_package (set
+# CMAKE_PREFIX_PATH to its installation).
+option(SIMDJSON_ARROW_ARROW_CPP "Build the example and the benchmark that use Arrow C++" OFF)
 
 include(FetchContent)
 FetchContent_Declare(simdjson
@@ -49,9 +51,19 @@ if(SIMDJSON_ARROW_BENCHMARKS)
   target_link_libraries(bench_write PRIVATE simdjson_arrow)
 endif()
 
-if(SIMDJSON_ARROW_BENCHMARK_ARROW_CPP)
+if(SIMDJSON_ARROW_EXAMPLES)
+  add_executable(example examples/example.cpp)
+  target_link_libraries(example PRIVATE simdjson_arrow)
+  if(SIMDJSON_ARROW_TESTS)
+    add_test(NAME example COMMAND example)
+  endif()
+endif()
+
+if(SIMDJSON_ARROW_ARROW_CPP)
   find_package(Arrow REQUIRED)
   add_executable(bench_arrow_cpp benchmarks/bench_arrow_cpp.cpp)
-  set_target_properties(bench_arrow_cpp PROPERTIES CXX_STANDARD 20)
+  add_executable(arrow_cpp examples/arrow_cpp.cpp)
+  set_target_properties(bench_arrow_cpp arrow_cpp PROPERTIES CXX_STANDARD 20)
   target_link_libraries(bench_arrow_cpp PRIVATE Arrow::arrow_shared)
+  target_link_libraries(arrow_cpp PRIVATE simdjson_arrow Arrow::arrow_shared)
 endif()

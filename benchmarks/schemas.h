@@ -1,5 +1,5 @@
 // The schemas of the benchmark inputs.
-// flat: the records of gendata.py in the blog benchmark (9 columns);
+// flat: the records of gendata.py (9 columns);
 // gh: six fields of the GH Archive events (the other fields are skipped).
 #ifndef SIMDJSON_ARROW_BENCHMARK_SCHEMAS_H
 #define SIMDJSON_ARROW_BENCHMARK_SCHEMAS_H
