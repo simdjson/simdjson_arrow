@@ -2,10 +2,13 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <atomic>
 #include <memory>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
+#include "../src/parallel.h"
 #include "simdjson_arrow.h"
 
 using namespace simdjson_arrow;
@@ -295,6 +298,53 @@ static void test_write_allocator() {
   exported.release(&exported);
 }
 
+// An exception in fn, on a worker or on the calling thread, reaches the
+// caller after all the threads are joined (it does not abort).
+static void test_parallel_for() {
+  for (size_t where : {size_t(0), size_t(37), size_t(999)}) {
+    std::atomic<size_t> calls{0};
+    bool caught = false;
+    try {
+      internal::parallel_for(1000, 4, [&](size_t i) {
+        calls++;
+        if (i == where) throw std::runtime_error("boom");
+      });
+    } catch (const std::runtime_error& e) {
+      caught = std::string(e.what()) == "boom";
+    }
+    CHECK(caught);
+    CHECK(calls.load() <= 1000);
+  }
+  std::vector<int> seen(1000, 0);
+  internal::parallel_for(seen.size(), 8, [&](size_t i) { seen[i]++; });
+  bool once = true;
+  for (int x : seen) once = once && x == 1;
+  CHECK(once);
+}
+
+// A failing allocator gives "out of memory", with one thread or several.
+static void test_write_out_of_memory() {
+  field schema = make_schema({make_field("i", type::int64)});
+  std::string json;
+  for (int i = 0; i < 100000; i++) json += "{\"i\":" + std::to_string(i) + "}\n";
+  ArrowSchema exported;
+  CHECK(export_schema(schema, &exported).ok());
+  auto batches = read(schema, json);
+  auto fail = [](void*, char*, size_t, size_t) -> char* { return nullptr; };
+  auto drop = [](void*, char*) {};
+  ndjson_allocator allocator{fail, drop, nullptr};
+  for (size_t threads : {1, 4}) {
+    ndjson_write_options options;
+    options.threads = threads;
+    ndjson_writer writer(options, allocator);
+    status s = writer.write(&exported, &batches[0]);
+    CHECK(!s.ok() && s.message == "out of memory");
+    CHECK(writer.view().empty());
+  }
+  release(batches);
+  exported.release(&exported);
+}
+
 // Infers the schema with several threads, and checks that we get the same
 // JSON back as with one thread.
 static void test_infer_threads() {
@@ -372,6 +422,8 @@ static void test_unpadded() {
 }
 
 int main() {
+  test_parallel_for();
+  test_write_out_of_memory();
   test_unpadded();
   test_infer_threads();
   test_write();

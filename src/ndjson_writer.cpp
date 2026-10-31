@@ -132,8 +132,8 @@ class output {
   static bool needs_escape(unsigned char c) { return c < 0x20 || c == '"' || c == '\\'; }
   // Whether one of the 8 bytes is a control character, a quote or a backslash.
   static bool needs_escape(uint64_t word) {
-    constexpr uint64_t ones = 0x0101010101010101;
-    constexpr uint64_t highs = 0x8080808080808080;
+    static constexpr uint64_t ones = 0x0101010101010101;  // static: MSVC wants it captured otherwise
+    static constexpr uint64_t highs = 0x8080808080808080;
     auto has_zero = [](uint64_t v) { return (v - ones) & ~v & highs; };
     const uint64_t control = (word - 0x20 * ones) & ~word & highs;  // a byte < 0x20
     return (control | has_zero(word ^ ('"' * ones)) | has_zero(word ^ ('\\' * ones))) != 0;
@@ -586,6 +586,9 @@ status ndjson_writer::write(const ArrowSchema* schema, const ArrowArray* const* 
   } catch (const std::bad_alloc&) {
     impl_->out.truncate(size);
     return status{"out of memory"};
+  } catch (const std::exception& e) {
+    impl_->out.truncate(size);
+    return status{e.what()};
   }
 }
 
@@ -607,12 +610,22 @@ status ndjson_writer::write(ArrowArrayStream* stream) {
       break;
     }
     if (batch.release == nullptr) break;  // end of the stream
-    batches.push_back(batch);
+    try {
+      batches.push_back(batch);
+    } catch (const std::bad_alloc&) {
+      batch.release(&batch);
+      s = status{"out of memory"};
+      break;
+    }
   }
   if (s.ok()) {
-    std::vector<const ArrowArray*> pointers;
-    for (const ArrowArray& batch : batches) pointers.push_back(&batch);
-    s = write(&schema, pointers.data(), pointers.size());
+    try {
+      std::vector<const ArrowArray*> pointers;
+      for (const ArrowArray& batch : batches) pointers.push_back(&batch);
+      s = write(&schema, pointers.data(), pointers.size());
+    } catch (const std::bad_alloc&) {
+      s = status{"out of memory"};
+    }
   }
   for (ArrowArray& batch : batches) batch.release(&batch);
   schema.release(&schema);
@@ -659,6 +672,10 @@ extern "C" int simdjson_arrow_write_ndjson(struct ArrowArrayStream* stream, int 
     }
   } catch (const std::bad_alloc&) {
     s = status{"out of memory"};
+  } catch (const std::exception& e) {
+    s = status{e.what()};
+  } catch (...) {
+    s = status{"unknown error"};
   }
   if (error != nullptr && error_capacity > 0) {
     size_t n = s.message.size() < error_capacity - 1 ? s.message.size() : error_capacity - 1;

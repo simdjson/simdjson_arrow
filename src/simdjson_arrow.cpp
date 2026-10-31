@@ -1046,10 +1046,8 @@ bool read_blocks(const field* schema, const char* json, size_t size, bool padded
       failed = true;
     }
   };
-  std::vector<std::thread> threads;
-  for (size_t t = 1; t < n_threads; t++) threads.emplace_back(work, t);
-  work(0);
-  for (std::thread& t : threads) t.join();
+  // One index per thread: if a thread cannot be started, another does its part.
+  parallel_for(n_threads, n_threads, work);
   if (failed) return false;
   for (auto& r : results) {
     for (piece& p : r) pieces->push_back(std::move(p));
@@ -1114,9 +1112,14 @@ status read_guarded(const field* schema, const char* json, size_t size, bool pad
     s = read_batches(schema, json, size, padded, batches, inferred, options);
   } catch (const std::bad_alloc&) {
     s = status{"out of memory"};
+  } catch (const std::exception& e) {
+    s = status{e.what()};
   }
-  if (!s.ok()) {
-    for (size_t i = first; i < batches->size(); i++) (*batches)[i].release(&(*batches)[i]);
+  if (!s.ok()) {  // the batches not exported yet have no release
+    for (size_t i = first; i < batches->size(); i++) {
+      ArrowArray& b = (*batches)[i];
+      if (b.release != nullptr) b.release(&b);
+    }
     batches->resize(first);
   }
   return s;
@@ -1198,5 +1201,9 @@ extern "C" int simdjson_arrow_read_ndjson(const char* data, size_t length, size_
     return 0;
   } catch (const std::bad_alloc&) {
     return report("out of memory");
+  } catch (const std::exception& e) {
+    return report(e.what());
+  } catch (...) {
+    return report("unknown error");
   }
 }
