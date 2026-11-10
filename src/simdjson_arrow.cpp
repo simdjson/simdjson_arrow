@@ -21,6 +21,14 @@ namespace {
 
 namespace sj = simdjson::ondemand;
 
+// The value in a result that has no error, without a copy: compilers copy
+// On-Demand values through the stack with loads that cannot be forwarded from
+// the stores that wrote them.
+template <typename T>
+simdjson_inline T& in_place(simdjson::simdjson_result<T>& r) {
+  return const_cast<T&>(r.value_unsafe());
+}
+
 // A growable byte buffer from malloc, so that we can hand it over to an
 // ArrowArray and free it in the release callback.
 class buffer {
@@ -739,8 +747,8 @@ class ndjson_parser {
     const uint64_t epoch = ++c.epoch;
     size_t guess = 0;
     for (auto field_result : object) {
-      sj::field f;
-      if (std::move(field_result).get(f)) return fail(c, "invalid JSON object");
+      if (field_result.error()) return fail(c, "invalid JSON object");
+      sj::field& f = in_place(field_result);
       bool ok = true;
       std::string_view key;
       size_t i = find_field(c, f, guess, &key, &ok);
@@ -773,9 +781,8 @@ class ndjson_parser {
   bool parse_list(column& c, sj::array& array) {
     column& item = *c.children[0];
     for (auto element_result : array) {
-      sj::value element;
-      if (std::move(element_result).get(element)) return fail(c, "invalid JSON array");
-      if (!parse_value(item, element)) return false;
+      if (element_result.error()) return fail(c, "invalid JSON array");
+      if (!parse_value(item, in_place(element_result))) return false;
     }
     if (item.size() > INT32_MAX) return fail(c, "more than 2^31 list items in one batch");
     c.values.push<int32_t>(static_cast<int32_t>(item.size()));
@@ -785,7 +792,7 @@ class ndjson_parser {
 
   // Checks that a skipped value is valid JSON. Errors are reported on the
   // struct column c that skips it.
-  bool validate(const column& c, sj::value value, int depth) {
+  bool validate(const column& c, sj::value& value, int depth) {
     if (depth > kMaxDepth) return fail(c, "JSON too deeply nested");
     sj::json_type json_type;
     if (value.type().get(json_type)) return fail(c, "invalid JSON value");
@@ -815,9 +822,8 @@ class ndjson_parser {
         sj::array array;
         if (value.get_array().get(array)) return fail(c, "invalid JSON array");
         for (auto element_result : array) {
-          sj::value element;
-          if (std::move(element_result).get(element)) return fail(c, "invalid JSON array");
-          if (!validate(c, element, depth + 1)) return false;
+          if (element_result.error()) return fail(c, "invalid JSON array");
+          if (!validate(c, in_place(element_result), depth + 1)) return false;
         }
         return true;
       }
@@ -825,11 +831,10 @@ class ndjson_parser {
         sj::object object;
         if (value.get_object().get(object)) return fail(c, "invalid JSON object");
         for (auto field_result : object) {
-          sj::field f;
+          if (field_result.error()) return fail(c, "invalid JSON object");
+          sj::field& f = in_place(field_result);
           std::string_view key;
-          if (std::move(field_result).get(f) || f.unescaped_key().get(key)) {
-            return fail(c, "invalid JSON object");
-          }
+          if (f.unescaped_key().get(key)) return fail(c, "invalid JSON object");
           if (!validate(c, f.value(), depth + 1)) return false;
         }
         return true;
