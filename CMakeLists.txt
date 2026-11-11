@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(simdjson_arrow VERSION 0.1.1 LANGUAGES CXX)
+project(simdjson_arrow VERSION 0.1.2 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -18,7 +18,7 @@ option(SIMDJSON_ARROW_ARROW_CPP "Build the example and the benchmark that use Ar
 
 include(FetchContent)
 FetchContent_Declare(simdjson
-  URL https://github.com/simdjson/simdjson/archive/refs/tags/v5.0.7.tar.gz
+  URL https://github.com/simdjson/simdjson/archive/refs/tags/v5.1.1.tar.gz
   DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
 set(SIMDJSON_DEVELOPER_MODE OFF CACHE BOOL "" FORCE)
 FetchContent_MakeAvailable(simdjson)

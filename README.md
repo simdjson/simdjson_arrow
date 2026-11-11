@@ -61,7 +61,7 @@ With CMake, the `simdjson_arrow` target brings simdjson with it:
 include(FetchContent)
 FetchContent_Declare(simdjson_arrow
   GIT_REPOSITORY https://github.com/simdjson/simdjson_arrow.git
-  GIT_TAG v0.1.1)
+  GIT_TAG v0.1.2)
 set(SIMDJSON_ARROW_TESTS OFF CACHE BOOL "" FORCE)
 set(SIMDJSON_ARROW_BENCHMARKS OFF CACHE BOOL "" FORCE)
 set(SIMDJSON_ARROW_EXAMPLES OFF CACHE BOOL "" FORCE)
@@ -347,7 +347,7 @@ cmake --build build
 ctest --test-dir build    # the C++ tests and the example
 ```
 
-CMake downloads simdjson 5.0.7. Options: `SIMDJSON_ARROW_TESTS`,
+CMake downloads simdjson 5.1.1. Options: `SIMDJSON_ARROW_TESTS`,
 `SIMDJSON_ARROW_BENCHMARKS` and `SIMDJSON_ARROW_EXAMPLES` (on by default), and
 `SIMDJSON_ARROW_ARROW_CPP` (off), which builds `examples/arrow_cpp.cpp` and
 `benchmarks/bench_arrow_cpp.cpp` against an installed Arrow C++ (with
