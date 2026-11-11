@@ -13,6 +13,7 @@
 #include <new>
 #include <string_view>
 #include <thread>
+#include <type_traits>
 #include <unordered_map>
 #include <utility>
 
@@ -28,6 +29,16 @@ template <typename T>
 simdjson_inline T& in_place(simdjson::simdjson_result<T>& r) {
   return const_cast<T&>(r.value_unsafe());
 }
+
+// validate() is faster with its value by value, except with clang on x64 as
+// long as simdjson copies values in one block (it then copies them field by
+// field, and they are no longer trivially copyable).
+#if defined(__clang__) && (defined(__x86_64__) || defined(_M_X64))
+using validated_value =
+    std::conditional_t<std::is_trivially_copyable_v<sj::value>, sj::value&, sj::value>;
+#else
+using validated_value = sj::value;
+#endif
 
 // A growable byte buffer from malloc, so that we can hand it over to an
 // ArrowArray and free it in the release callback.
@@ -792,7 +803,7 @@ class ndjson_parser {
 
   // Checks that a skipped value is valid JSON. Errors are reported on the
   // struct column c that skips it.
-  bool validate(const column& c, sj::value& value, int depth) {
+  bool validate(const column& c, validated_value value, int depth) {
     if (depth > kMaxDepth) return fail(c, "JSON too deeply nested");
     sj::json_type json_type;
     if (value.type().get(json_type)) return fail(c, "invalid JSON value");
