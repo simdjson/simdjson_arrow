@@ -11,6 +11,7 @@
 #include "simdjson_arrow.h"
 
 #include "parallel.h"
+#include "timestamp.h"
 #include "zmij.h"  // shortest representation of floating-point numbers
 
 namespace simdjson_arrow {
@@ -216,6 +217,9 @@ enum class kind {
   list,        // int32 offsets
   large_list,  // int64 offsets
   fixed_list,
+  timestamp,   // int64 units since the epoch
+  date32,      // int32 days since the epoch
+  date64,      // int64 milliseconds since the epoch
 };
 
 // What we need to write the values of one Arrow array (and its children).
@@ -229,6 +233,8 @@ struct node {
   const void* const* view_buffers{nullptr};  // data buffers of utf8_view
   int64_t n_view_buffers{0};
   int64_t fixed_size{0};
+  int unit{0};       // of a timestamp: 0 to 3 for seconds to nanoseconds
+  bool utc{false};   // a timestamp with a time zone: we write Z
   std::vector<node> children;
   std::vector<std::string> keys;  // for a struct: "name": (escaped, quoted)
 
@@ -300,6 +306,15 @@ status make_node(const ArrowSchema* schema, const ArrowArray* array, node* out, 
   } else if (format == "+L") {
     n.k = kind::large_list;
     expected_children = 1;
+  } else if (format.size() >= 4 && format.substr(0, 2) == "ts" && format[3] == ':' &&
+             std::string_view("smun").find(format[2]) != std::string_view::npos) {
+    n.k = kind::timestamp;
+    n.unit = static_cast<int>(std::string_view("smun").find(format[2]));
+    n.utc = format.size() > 4;
+  } else if (format == "tdD") {
+    n.k = kind::date32;
+  } else if (format == "tdm") {
+    n.k = kind::date64;
   } else if (format.size() > 3 && format.substr(0, 3) == "+w:") {
     n.k = kind::fixed_list;
     expected_buffers = 1;
@@ -458,7 +473,34 @@ class value_writer {
       case kind::fixed_list:
         write_array(n.children[0], j * n.fixed_size, (j + 1) * n.fixed_size);
         break;
+      case kind::timestamp:
+        write_time(static_cast<const int64_t*>(n.values)[j], n.unit, n.utc, false);
+        break;
+      case kind::date32:
+        write_time(static_cast<const int32_t*>(n.values)[j], 0, false, true);
+        break;
+      case kind::date64:
+        write_time(static_cast<const int64_t*>(n.values)[j], 1, false, true);
+        break;
     }
+  }
+
+  // Writes "2015-01-01T15:00:00" (see internal::write_timestamp), or
+  // "2015-01-01" with date_only (value in days for unit 0, in milliseconds
+  // for unit 1).
+  void write_time(int64_t value, int unit, bool utc, bool date_only) {
+    char* const start = b_.reserve(48);
+    char* p = start;
+    *p++ = '"';
+    if (date_only) {
+      int64_t days = value, in_day;
+      if (unit == 1) internal::split_days(value, 86400000, &days, &in_day);
+      p = internal::write_date(p, days);
+    } else {
+      p = internal::write_timestamp(p, value, unit, utc);
+    }
+    *p++ = '"';
+    b_.advance(static_cast<size_t>(p - start));
   }
 
   // Writes the struct value at index i (not null) as a JSON object.

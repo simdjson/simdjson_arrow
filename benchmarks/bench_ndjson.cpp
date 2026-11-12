@@ -15,7 +15,7 @@ using namespace simdjson_arrow;
 
 int main(int argc, char** argv) {
   if (argc < 3) {
-    std::fprintf(stderr, "usage: %s file.ndjson flat|gh|infer [rounds] [validate] [threads]\n",
+    std::fprintf(stderr, "usage: %s file.ndjson flat|gh|gh_ts|infer [rounds] [validate] [threads]\n",
                  argv[0]);
     return EXIT_FAILURE;
   }

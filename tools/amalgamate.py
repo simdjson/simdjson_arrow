@@ -18,6 +18,7 @@ SOURCES = [
     "third_party/zmij/zmij.h",
     "third_party/zmij/zmij.cc",
     "src/parallel.h",
+    "src/timestamp.h",
     "src/simdjson_arrow.cpp",
     "src/ndjson_writer.cpp",
 ]
