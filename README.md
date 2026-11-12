@@ -150,13 +150,13 @@ goes the other way.
 A timestamp counts seconds, milliseconds, microseconds or nanoseconds (its
 `unit`) since 1970-01-01T00:00:00Z; its `timezone` (say, `"UTC"`) only tells
 how to display it. We read it from an ISO 8601 (RFC 3339) string: a date
-(`2015-01-01`), then optionally `T` (or a space) and a time (`15:00`,
-`15:00:00` or `15:00:00.123456`, with up to 9 digits of fraction; the digits
-beyond the unit are dropped), then optionally `Z` or an offset (`+05:00`,
+(`2015-01-01`), then optionally `T` (or a space) and a time (`15`, `15:00`,
+`15:00:00` or `15:00:00.123456`), then optionally `Z` or an offset (`+05:00`,
 `+0500` or `+05`). A time without `Z` or an offset is taken as UTC. An integer
 is a count of units, as it is. A string that is not such a timestamp is an
-error, as is a timestamp out of the range of the unit (nanoseconds go from
-1677 to 2262).
+error, as is a fraction with more digits than the unit (3 for milliseconds,
+say: as with Arrow's JSON reader, we do not lose precision quietly) or a
+timestamp out of the range of the unit (nanoseconds go from 1677 to 2262).
 
 ```cpp
 make_timestamp("created_at", time_unit::microsecond, "UTC")

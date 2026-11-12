@@ -59,12 +59,13 @@ inline bool read_digits(std::string_view s, size_t* i, int n, unsigned* out) {
 }
 
 // Parses a timestamp: a date YYYY-MM-DD, then optionally T (or t, or a space)
-// and a time HH:MM, HH:MM:SS or HH:MM:SS.fraction (with . or , and 1 to 9
-// digits), then optionally Z (or z) or an offset +HH:MM, +HHMM or +HH (or
-// with -). Without Z or an offset, the time is taken as UTC. Gives the count
-// of units (0 to 3: seconds to nanoseconds) since the epoch; digits beyond
-// the unit are dropped. Returns false if s is not such a timestamp, or if the
-// count does not fit in 64 bits.
+// and a time HH, HH:MM, HH:MM:SS or HH:MM:SS.fraction (with . or ,), then
+// optionally Z (or z) or an offset +HH:MM, +HHMM or +HH (or with -). Without
+// Z or an offset, the time is taken as UTC. Gives the count of units (0 to 3:
+// seconds to nanoseconds) since the epoch. Returns false if s is not such a
+// timestamp, if its fraction has more digits than the unit (as Arrow's JSON
+// reader does: we do not lose precision quietly), or if the count does not
+// fit in 64 bits.
 inline bool parse_timestamp(std::string_view s, int unit, int64_t* out) {
   size_t i = 0;
   unsigned year, month, day, hour = 0, minute = 0, second = 0;
@@ -78,24 +79,25 @@ inline bool parse_timestamp(std::string_view s, int unit, int64_t* out) {
   int64_t offset = 0;    // in seconds, to subtract
   if (i < s.size() && (s[i] == 'T' || s[i] == 't' || s[i] == ' ')) {
     i++;
-    if (!read_digits(s, &i, 2, &hour) || i >= s.size() || s[i++] != ':' ||
-        !read_digits(s, &i, 2, &minute)) {
-      return false;
-    }
+    if (!read_digits(s, &i, 2, &hour)) return false;
     if (i < s.size() && s[i] == ':') {
       i++;
-      if (!read_digits(s, &i, 2, &second)) return false;
-      if (i < s.size() && (s[i] == '.' || s[i] == ',')) {
+      if (!read_digits(s, &i, 2, &minute)) return false;
+      if (i < s.size() && s[i] == ':') {
         i++;
-        const size_t start = i;
-        int64_t scale = kUnitsPerSecond[unit];
-        while (i < s.size() && static_cast<unsigned>(s[i] - '0') <= 9) {
-          if (i - start == 9) return false;
-          scale /= 10;
-          fraction += (s[i] - '0') * scale;
+        if (!read_digits(s, &i, 2, &second)) return false;
+        if (i < s.size() && (s[i] == '.' || s[i] == ',')) {
           i++;
+          const size_t start = i;
+          int64_t scale = kUnitsPerSecond[unit];
+          while (i < s.size() && static_cast<unsigned>(s[i] - '0') <= 9) {
+            if (i - start == static_cast<size_t>(kFractionDigits[unit])) return false;
+            scale /= 10;
+            fraction += (s[i] - '0') * scale;
+            i++;
+          }
+          if (i == start) return false;
         }
-        if (i == start) return false;
       }
     }
     if (hour > 23 || minute > 59 || second > 59) return false;

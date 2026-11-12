@@ -156,10 +156,10 @@ struct ndjson_options {
 // A JSON key absent from the schema is skipped (or an error), a field absent
 // from the record is null. A timestamp is read from an ISO 8601 (RFC 3339)
 // string, such as 2015-01-01T15:00:00Z or 2015-01-01 15:00:00.123+05:00: a
-// date, then optionally a time (seconds and a fraction of up to 9 digits are
-// optional; the digits beyond the unit are dropped), then optionally Z or an
-// offset. A time without Z or an offset is taken as UTC. An integer is a
-// count of units since the epoch.
+// date, then optionally a time (minutes, seconds and a fraction are optional;
+// a fraction with more digits than the unit is an error, as with Arrow), then
+// optionally Z or an offset. A time without Z or an offset is taken as UTC.
+// An integer is a count of units since the epoch.
 status read_ndjson(const field& schema, simdjson::padded_string_view json,
                    std::vector<ArrowArray>* batches, const ndjson_options& options = {});
 
