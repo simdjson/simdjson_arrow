@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "../src/parallel.h"
+#include "../src/timestamp.h"
 #include "simdjson_arrow.h"
 
 using namespace simdjson_arrow;
@@ -481,7 +482,205 @@ static void test_unpadded() {
   }
 }
 
+static int64_t ts(const char* s, int unit) {
+  int64_t x = INT64_MIN;
+  if (!internal::parse_timestamp(s, unit, &x)) {
+    std::printf("cannot parse %s\n", s);
+    failures++;
+  }
+  return x;
+}
+
+static bool bad_ts(const char* s, int unit = 2) {
+  int64_t x;
+  return !internal::parse_timestamp(s, unit, &x);
+}
+
+static std::string format_ts(int64_t v, int unit, bool utc) {
+  char buf[48];
+  return std::string(buf, internal::write_timestamp(buf, v, unit, utc));
+}
+
+static void test_timestamp_parse() {
+  const int s = 0, ms = 1, us = 2, ns = 3;
+  CHECK(ts("1970-01-01T00:00:00Z", s) == 0);
+  CHECK(ts("1970-01-01", ns) == 0);
+  CHECK(ts("2015-01-01T15:00:00Z", us) == INT64_C(1420124400000000));
+  CHECK(ts("2015-01-01T15:00:00", s) == 1420124400);  // no offset: UTC
+  CHECK(ts("2015-01-01t15:00:00z", s) == 1420124400);
+  CHECK(ts("2015-01-01 15:00", s) == 1420124400);
+  CHECK(ts("2015-01-01", s) == 1420070400);
+  CHECK(ts("2015-01-01T15:00:00.123+05:00", us) == INT64_C(1420106400123000));
+  CHECK(ts("2015-01-01T15:00:00,5-0130", ms) == INT64_C(1420129800500));
+  CHECK(ts("2015-01-01T15:00:00+05", s) == 1420106400);
+  CHECK(ts("2015-01-01T15:00:00.123456789Z", ns) == INT64_C(1420124400123456789));
+  CHECK(ts("2015-01-01T15:00:00.123Z", ms) == INT64_C(1420124400123));
+  CHECK(ts("2015-01-01T15:00:00.1Z", us) == INT64_C(1420124400100000));
+  CHECK(ts("2015-01-01T15Z", s) == 1420124400);  // the hour only
+  CHECK(ts("2015-01-01T15+01:00", s) == 1420120800);
+  // More digits than the unit has: an error, as with Arrow (even zeros).
+  CHECK(bad_ts("2015-01-01T15:00:00.123456789Z", ms));
+  CHECK(bad_ts("2015-01-01T15:00:00.1230Z", ms));
+  CHECK(bad_ts("2015-01-01T15:00:00.9Z", s));
+  CHECK(bad_ts("2015-01-01T15:00:00.1234567Z", us));
+  CHECK(ts("1969-12-31T23:59:59.5Z", ms) == -500);
+  CHECK(ts("1900-03-01", s) == INT64_C(-2203891200));
+  CHECK(ts("0000-01-01", s) == -62167219200);
+  CHECK(ts("2016-02-29", s) == 1456704000);
+  CHECK(ts("2000-02-29", s) == 951782400);
+  CHECK(ts("2262-04-11T23:47:16.854775807Z", ns) == INT64_MAX);
+  CHECK(ts("1677-09-21T00:12:43.145224192Z", ns) == INT64_MIN);
+  CHECK(ts("9999-12-31T23:59:59.999999Z", us) == INT64_C(253402300799999999));
+  for (const char* bad : {"", "2015", "2015-01", "2015-1-01", "2015-01-1", "2015/01/01",
+                          "2015-00-01", "2015-13-01", "2015-01-00", "2015-01-32", "2015-02-29",
+                          "1900-02-29", "2015-01-01T", "2015-01-01T1", "2015-01-01T1:00",
+                          "2015-01-01T12:", "2015-01-01T12:0", "2015-01-01T12:00:",
+                          "2015-01-01T24:00", "2015-01-01T12:60", "2015-01-01T12:00:60",
+                          "2015-01-01T12:00:00.", "2015-01-01T12:00:00.1234567",
+                          "2015-01-01T12:00:00Zx", "2015-01-01T12:00:00 Z", "2015-01-01Z",
+                          "2015-01-01T12:00:00+5", "2015-01-01T12:00:00+05:0",
+                          "2015-01-01T12:00:00+0530x", "2015-01-01T12:00:00+24:00",
+                          "2015-01-01T12:00:00+05:60", " 2015-01-01", "2015-01-01 ",
+                          "+2015-01-01", "-2015-01-01", "2015-01-01T12:00:00.12a"}) {
+    if (!bad_ts(bad)) {
+      std::printf("accepted %s\n", bad);
+      failures++;
+    }
+  }
+  CHECK(bad_ts("2262-04-11T23:47:16.854775808Z", ns));  // past INT64_MAX
+  CHECK(bad_ts("1677-09-21T00:12:43.145224191Z", ns));
+  CHECK(bad_ts("2262-04-11T23:47:16.854775808Z", us));  // 9 digits in microseconds
+  CHECK(!bad_ts("2262-04-11T23:47:16.854775Z", us));
+}
+
+static void test_timestamp_format() {
+  CHECK(format_ts(0, 0, false) == "1970-01-01T00:00:00");
+  CHECK(format_ts(0, 3, true) == "1970-01-01T00:00:00Z");
+  CHECK(format_ts(INT64_C(1420124400123000), 2, true) == "2015-01-01T15:00:00.123000Z");
+  CHECK(format_ts(INT64_C(1420124400123), 1, false) == "2015-01-01T15:00:00.123");
+  CHECK(format_ts(-500, 1, false) == "1969-12-31T23:59:59.500");
+  CHECK(format_ts(-1, 3, false) == "1969-12-31T23:59:59.999999999");
+  CHECK(format_ts(INT64_MAX, 3, false) == "2262-04-11T23:47:16.854775807");
+  CHECK(format_ts(INT64_MIN, 3, false) == "1677-09-21T00:12:43.145224192");
+  CHECK(format_ts(-62167219200, 0, false) == "0000-01-01T00:00:00");
+  CHECK(format_ts(-62167219201, 0, false) == "-0001-12-31T23:59:59");
+  CHECK(format_ts(INT64_C(253402300800), 0, false) == "10000-01-01T00:00:00");
+  CHECK(format_ts(INT64_MAX, 0, false).size() <= 40);
+  CHECK(format_ts(INT64_MIN, 0, true).size() <= 40);
+  // Round trips, in every unit, over years 0 to 9999 (as far as the unit goes).
+  uint64_t x = 12345;
+  for (int k = 0; k < 200000; k++) {
+    x ^= x << 13;
+    x ^= x >> 7;
+    x ^= x << 17;
+    const int unit = static_cast<int>(x % 4);
+    const int64_t lo = unit == 3 ? INT64_MIN : -62167219200 * internal::kUnitsPerSecond[unit];
+    const int64_t hi = unit == 3 ? INT64_MAX : 253402300799 * internal::kUnitsPerSecond[unit];
+    const uint64_t span = static_cast<uint64_t>(hi) - static_cast<uint64_t>(lo);
+    const int64_t v = static_cast<int64_t>(static_cast<uint64_t>(lo) + (x >> 2) % span);
+    const std::string text = format_ts(v, unit, (x & 1) != 0);
+    int64_t back;
+    if (!internal::parse_timestamp(text, unit, &back) || back != v) {
+      std::printf("round trip of %lld (unit %d) failed: %s\n", static_cast<long long>(v), unit,
+                  text.c_str());
+      failures++;
+      break;
+    }
+  }
+}
+
+static void test_timestamps() {
+  field schema = make_schema({make_timestamp("t", time_unit::microsecond, "UTC"),
+                              make_timestamp("n", time_unit::second)});
+  auto batches = read(schema,
+                      "{\"t\": \"2015-01-01T15:00:00.25Z\", \"n\": \"2015-01-01\"}\n"
+                      "{\"t\": null, \"n\": 1420070400}\n"
+                      "{\"t\": -1}\n"
+                      "{\"t\": \"2015-01-01T15:00:00\\u002B01:00\"}\n");
+  CHECK(batches.size() == 1);
+  const ArrowArray* t = batches[0].children[0];
+  const ArrowArray* n = batches[0].children[1];
+  CHECK(value_at<int64_t>(t, 0) == INT64_C(1420124400250000));
+  CHECK(!is_valid(t, 1) && t->null_count == 1);
+  CHECK(value_at<int64_t>(t, 2) == -1);
+  CHECK(value_at<int64_t>(t, 3) == INT64_C(1420120800000000));
+  CHECK(value_at<int64_t>(n, 0) == 1420070400 && value_at<int64_t>(n, 1) == 1420070400);
+  CHECK(!is_valid(n, 2) && !is_valid(n, 3));
+  // Back to NDJSON: UTC (Z) with a time zone, the fraction only when there is one.
+  ArrowSchema exported;
+  CHECK(export_schema(schema, &exported).ok());
+  CHECK(std::strcmp(exported.children[0]->format, "tsu:UTC") == 0);
+  CHECK(std::strcmp(exported.children[1]->format, "tss:") == 0);
+  field back;
+  CHECK(import_schema(&exported, &back).ok());
+  CHECK(back.children[0].type == type::timestamp && back.children[0].timezone == "UTC" &&
+        back.children[0].unit == time_unit::microsecond);
+  CHECK(back.children[1].unit == time_unit::second && back.children[1].timezone.empty());
+  std::string out;
+  CHECK(write_ndjson(&exported, &batches[0], &out).ok());
+  CHECK(out ==
+        "{\"t\":\"2015-01-01T15:00:00.250000Z\",\"n\":\"2015-01-01T00:00:00\"}\n"
+        "{\"t\":null,\"n\":\"2015-01-01T00:00:00\"}\n"
+        "{\"t\":\"1969-12-31T23:59:59.999999Z\",\"n\":null}\n"
+        "{\"t\":\"2015-01-01T14:00:00Z\",\"n\":null}\n");
+  exported.release(&exported);
+  release(batches);
+  CHECK(contains(read_error(schema, "{\"t\": \"2015-02-30\"}"),
+                 "invalid timestamp \"2015-02-30\" (row 0, field /t)"));
+  CHECK(contains(read_error(schema, "{\"t\": 1.5}"), "expected a timestamp, found a number"));
+  CHECK(contains(read_error(schema, "{\"t\": true}"), "expected a timestamp, found a boolean"));
+  CHECK(contains(read_error(schema, "{\"t\": \"\\q\"}"), "invalid"));
+  std::string long_text(100, '9');
+  CHECK(contains(read_error(schema, "{\"t\": \"" + long_text + "\"}"), "...\""));
+  for (const char* format : {"ts:", "tsx:", "tsu", "tsuUTC"}) {
+    ArrowSchema bad{};
+    bad.format = format;
+    bad.name = "x";
+    field f;
+    CHECK(!import_schema(&bad, &f).ok());
+  }
+}
+
+static void no_release(ArrowArray* a) { a->release = nullptr; }
+
+// Writes date32 and date64 columns, which we only write.
+static void test_write_dates() {
+  static int32_t days[3] = {0, 16436, -1};
+  static int64_t millis[3] = {0, INT64_C(1420070400000), -86400000};
+  static uint8_t validity = 0x5;  // the middle value is null
+  static const void* day_buffers[2] = {&validity, days};
+  static const void* milli_buffers[2] = {nullptr, millis};
+  static const void* root_buffers[1] = {nullptr};
+  ArrowArray d32{3, 1, 0, 2, 0, day_buffers, nullptr, nullptr, no_release, nullptr};
+  ArrowArray d64{3, 0, 0, 2, 0, milli_buffers, nullptr, nullptr, no_release, nullptr};
+  ArrowArray* kids[2] = {&d32, &d64};
+  ArrowArray root{3, 0, 0, 1, 2, root_buffers, kids, nullptr, no_release, nullptr};
+  ArrowSchema s32{}, s64{};
+  s32.format = "tdD";
+  s32.name = "a";
+  s32.flags = ARROW_FLAG_NULLABLE;
+  s64.format = "tdm";
+  s64.name = "b";
+  ArrowSchema* schema_kids[2] = {&s32, &s64};
+  ArrowSchema schema{};
+  schema.format = "+s";
+  schema.name = "";
+  schema.n_children = 2;
+  schema.children = schema_kids;
+  std::string out;
+  status s = write_ndjson(&schema, &root, &out);
+  CHECK(s.ok());
+  CHECK(out ==
+        "{\"a\":\"1970-01-01\",\"b\":\"1970-01-01\"}\n"
+        "{\"a\":null,\"b\":\"2015-01-01\"}\n"
+        "{\"a\":\"1969-12-31\",\"b\":\"1969-12-31\"}\n");
+}
+
 int main() {
+  test_timestamp_parse();
+  test_timestamp_format();
+  test_timestamps();
+  test_write_dates();
   test_parallel_for();
   test_write_out_of_memory();
   test_write_allocator_failures();

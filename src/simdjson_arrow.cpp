@@ -1,6 +1,7 @@
 #include "simdjson_arrow.h"
 
 #include "parallel.h"
+#include "timestamp.h"
 
 #include <algorithm>
 #include <atomic>
@@ -148,6 +149,8 @@ struct column {
   column* parent{nullptr};
   type t{type::null};
   bool nullable{true};
+  time_unit unit{time_unit::microsecond};  // of a timestamp
+  std::string timezone;                    // of a timestamp
   int64_t length{0};      // values written
   int64_t null_count{0};  // among the values written
   int64_t pending{0};     // nulls that follow, not written yet (we write them in bulk)
@@ -172,12 +175,16 @@ struct column {
   // An empty column for the field (and its children).
   static std::unique_ptr<column> make(const field& f, column* up) {
     auto c = std::make_unique<column>(f.name, f.type, f.nullable, up);
+    c->unit = f.unit;
+    c->timezone = f.timezone;
     for (const field& child : f.children) c->adopt(make(child, c.get()));
     return c;
   }
   // An empty column with the same fields and types.
   std::unique_ptr<column> clone_structure(column* up) const {
     auto c = std::make_unique<column>(name, t, nullable, up);
+    c->unit = unit;
+    c->timezone = timezone;
     for (const auto& child : children) c->adopt(child->clone_structure(c.get()));
     return c;
   }
@@ -223,7 +230,9 @@ struct column {
   }
   // The field we built (the schema of the column).
   field describe() const {
-    field f{name, t, nullable, {}};
+    field f = make_field(name, t, nullable);
+    f.unit = unit;
+    f.timezone = timezone;
     for (const auto& child : children) f.children.push_back(child->describe());
     return f;
   }
@@ -249,6 +258,7 @@ void write_nulls(column& c) {
     case type::int64:
     case type::uint64:
     case type::float64:
+    case type::timestamp:
       c.values.append_zeros(static_cast<size_t>(n) * 8);
       break;
     case type::utf8:
@@ -306,6 +316,8 @@ const char* type_word(type t) {
       return "struct";
     case type::list:
       return "list";
+    case type::timestamp:
+      return "timestamp";
   }
   return "?";
 }
@@ -416,6 +428,7 @@ void export_column(column& c, ArrowArray* out) {
       case type::int64:
       case type::uint64:
       case type::float64:
+      case type::timestamp:
       case type::list:
         add(c.values.release());
         break;
@@ -482,6 +495,8 @@ const char* expected_name(type t) {
       return "an object";
     case type::list:
       return "an array";
+    case type::timestamp:
+      return "a timestamp";
   }
   return "?";
 }
@@ -662,11 +677,30 @@ class ndjson_parser {
         if (simdjson_unlikely(value.get_array().get(array))) return parse_other(c, value);
         return parse_list(c, array);
       }
+      case type::timestamp: {
+        std::string_view s;
+        int64_t x;
+        if (simdjson_likely(!value.get_string().get(s))) {
+          if (simdjson_unlikely(!internal::parse_timestamp(s, static_cast<int>(c.unit), &x))) {
+            return invalid_timestamp(c, s);
+          }
+        } else if (value.get_int64().get(x)) {
+          return parse_other(c, value);
+        }
+        c.values.push(x);
+        break;
+      }
       case type::null:
         return parse_other(c, value);
     }
     c.append_valid();
     return true;
+  }
+
+  simdjson_never_inline bool invalid_timestamp(column& c, std::string_view s) {
+    std::string shown(s.substr(0, 64));
+    if (s.size() > 64) shown += "...";
+    return fail(c, "invalid timestamp \"" + shown + "\"");
   }
 
   // The value is not of the type of the column: it is null, of another type,
@@ -704,6 +738,7 @@ class ndjson_parser {
     if (number_column && json_type == sj::json_type::number) return number_error(c, value);
     const bool same_type = (c.t == type::boolean && json_type == sj::json_type::boolean) ||
                            (c.t == type::utf8 && json_type == sj::json_type::string) ||
+                           (c.t == type::timestamp && json_type == sj::json_type::string) ||
                            (c.t == type::struct_ && json_type == sj::json_type::object) ||
                            (c.t == type::list && json_type == sj::json_type::array);
     if (same_type) return fail(c, "invalid JSON value");
@@ -890,8 +925,12 @@ void release_schema(ArrowSchema* schema) {
   schema->release = nullptr;
 }
 
-const char* format_of(type t) {
-  switch (t) {
+std::string format_of(const field& f) {
+  if (f.type == type::timestamp) {
+    static const char units[4] = {'s', 'm', 'u', 'n'};
+    return std::string("ts") + units[static_cast<int>(f.unit)] + ":" + f.timezone;
+  }
+  switch (f.type) {
     case type::null:
       return "n";
     case type::boolean:
@@ -908,6 +947,8 @@ const char* format_of(type t) {
       return "+s";
     case type::list:
       return "+l";
+    case type::timestamp:
+      break;
   }
   return "";
 }
@@ -977,6 +1018,11 @@ status import_schema(const ArrowSchema* schema, field* out) {
     f.type = type::struct_;
   } else if (format == "+l") {
     f.type = type::list;
+  } else if (format.size() >= 4 && format.compare(0, 2, "ts") == 0 && format[3] == ':' &&
+             std::string_view("smun").find(format[2]) != std::string_view::npos) {
+    f.type = type::timestamp;
+    f.unit = static_cast<time_unit>(std::string_view("smun").find(format[2]));
+    f.timezone = format.substr(4);
   } else {
     return status{"unsupported Arrow type (format \"" + format + "\") for field " + f.name};
   }
@@ -997,7 +1043,7 @@ status import_schema(const ArrowSchema* schema, field* out) {
 
 status export_schema(const field& schema, ArrowSchema* out) {
   auto* holder = new schema_holder;
-  holder->format = format_of(schema.type);
+  holder->format = format_of(schema);
   holder->name = schema.name;
   holder->child_schemas.resize(schema.children.size());
   for (size_t i = 0; i < schema.children.size(); i++) {
@@ -1112,7 +1158,7 @@ status read_batches(const field* schema, const char* json, size_t size, bool pad
   if (schema == nullptr) {
     std::vector<field> fields(pieces.size());
     parallel_for(pieces.size(), threads, [&](size_t i) { fields[i] = pieces[i].root->describe(); });
-    field table{"", type::struct_, false, {}};
+    field table = make_schema({});
     for (const field& f : fields) {
       status s = merge(table, f, "");
       if (!s.ok()) return s;

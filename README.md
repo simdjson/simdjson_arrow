@@ -130,7 +130,8 @@ whose children are the columns: the caller releases them (`b.release(&b)`).
 ### Schemas
 
 A schema is a `field` of type `struct_` whose children are the columns; build
-one with `make_schema`, `make_field`, `make_struct` and `make_list`, or from an
+one with `make_schema`, `make_field`, `make_struct`, `make_list` and
+`make_timestamp`, or from an
 Arrow schema with `import_schema(const ArrowSchema*, field*)`. `export_schema`
 goes the other way.
 
@@ -144,6 +145,22 @@ goes the other way.
 | `utf8` | utf8 (`u`) | strings (unescaped) |
 | `struct_` | struct (`+s`) | objects |
 | `list` | list (`+l`) | arrays |
+| `timestamp` | timestamp (`tss:`, `tsm:`, `tsu:`, `tsn:`, with or without a time zone) | ISO 8601 strings, integers |
+
+A timestamp counts seconds, milliseconds, microseconds or nanoseconds (its
+`unit`) since 1970-01-01T00:00:00Z; its `timezone` (say, `"UTC"`) only tells
+how to display it. We read it from an ISO 8601 (RFC 3339) string: a date
+(`2015-01-01`), then optionally `T` (or a space) and a time (`15`, `15:00`,
+`15:00:00` or `15:00:00.123456`), then optionally `Z` or an offset (`+05:00`,
+`+0500` or `+05`). A time without `Z` or an offset is taken as UTC. An integer
+is a count of units, as it is. A string that is not such a timestamp is an
+error, as is a fraction with more digits than the unit (3 for milliseconds,
+say: as with Arrow's JSON reader, we do not lose precision quietly) or a
+timestamp out of the range of the unit (nanoseconds go from 1677 to 2262).
+
+```cpp
+make_timestamp("created_at", time_unit::microsecond, "UTC")
+```
 
 The rules, as with Arrow's JSON reader:
 
@@ -234,8 +251,12 @@ struct ndjson_write_options {
 ```
 
 We write the Arrow types null, bool, the integers (8 to 64 bits, signed or
-not), float32, float64, utf8, large utf8, utf8 view, struct, list, large list
-and fixed-size list, with any offsets (slices) and null bitmaps.
+not), float32, float64, utf8, large utf8, utf8 view, struct, list, large list,
+fixed-size list, timestamp, date32 and date64, with any offsets (slices) and
+null bitmaps. Timestamps are written in ISO 8601, in UTC:
+`"2015-01-01T15:00:00"`, followed by `Z` when the timestamp has a time zone,
+with the fraction of a second (3, 6 or 9 digits, by unit) when it is not zero.
+Dates are written as `"2015-01-01"`.
 Floating-point numbers get the shortest representation that gives them back,
 as Python's `repr` (`1.0` rather than `1`, `1e+21`); NaN and infinities, which
 JSON lacks, become `null`. Strings are escaped as JSON requires (quotes,

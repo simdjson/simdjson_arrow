@@ -1,6 +1,7 @@
 // The schemas of the benchmark inputs.
 // flat: the records of gendata.py (9 columns);
-// gh: six fields of the GH Archive events (the other fields are skipped).
+// gh: six fields of the GH Archive events (the other fields are skipped);
+// gh_ts: the same, with created_at as a timestamp (microseconds, UTC).
 #ifndef SIMDJSON_ARROW_BENCHMARK_SCHEMAS_H
 #define SIMDJSON_ARROW_BENCHMARK_SCHEMAS_H
 
@@ -24,6 +25,15 @@ inline bool benchmark_schema(const std::string& name, simdjson_arrow::field* out
          make_struct("actor", {make_field("id", type::int64), make_field("login", type::utf8)}),
          make_struct("repo", {make_field("id", type::int64), make_field("name", type::utf8)}),
          make_field("public", type::boolean), make_field("created_at", type::utf8)});
+    return true;
+  }
+  if (name == "gh_ts") {
+    *out = make_schema(
+        {make_field("id", type::utf8), make_field("type", type::utf8),
+         make_struct("actor", {make_field("id", type::int64), make_field("login", type::utf8)}),
+         make_struct("repo", {make_field("id", type::int64), make_field("name", type::utf8)}),
+         make_field("public", type::boolean),
+         make_timestamp("created_at", time_unit::microsecond, "UTC")});
     return true;
   }
   return false;
